@@ -1,0 +1,26 @@
+# ChromaDB data
+chroma/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Go
+*.exe
+*.out
+*.test
+
+# Node/npm (if any)
+node_modules/
+
+# Secrets
+.env
+*.key
+*.pem
+
+# OS files
+.DS_Store
+Thumbs.db
