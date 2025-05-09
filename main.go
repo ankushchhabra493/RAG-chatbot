@@ -19,6 +19,7 @@ import (
 
 const (
     GEMINI_API_KEY = "AIzaSyB8VhcP_Sfghc_TbwQVZm_R5x1_IxVYhM8"
+    EMBEDDING_SERVER_URL = "http://localhost:8000"
     CHROMA_API_URL = "http://localhost:8000/api/v1/query" // Use v1 endpoint for compatibility
     CHROMA_HEARTBEAT_URL = "http://localhost:8000/api/v1/heartbeat"
     CHROMA_COLLECTION = "pubmed-central"
@@ -129,86 +130,50 @@ func getEmbedding(ctx context.Context, text string) ([]float32, error) {
         log.Printf("Step 2.6: Error unmarshalling embedding response: %v", err)
         return nil, err
     }
+    
+    // Print embedding details
     log.Printf("Step 2.7: Successfully received embedding from Python server")
+    log.Printf("Embedding length: %d", len(pyResp.Embedding))
+    if len(pyResp.Embedding) > 10 {
+        log.Printf("First 10 values: %v", pyResp.Embedding[:10])
+    }
+    
     return pyResp.Embedding, nil
 }
 
 // Helper: Query ChromaDB for relevant contexts
 func queryChromaDB(queryEmbedding []float32, topK int) ([]string, error) {
-    log.Printf("Step 3.1: Preparing ChromaDB query payload")
-    // Prepare request payload for v1 API
-    payload := fmt.Sprintf(`{
-        "collection": "%s",
-        "query_embeddings": [%v],
-        "n_results": %d
-    }`, CHROMA_COLLECTION, floatArrayToString(queryEmbedding), topK)
-
-    req, err := http.NewRequest("POST", CHROMA_API_URL, bytes.NewBuffer([]byte(payload)))
+    log.Printf("Step 3.1: Querying embedding server for similar documents")
+    
+    payload := fmt.Sprintf(`{"text": %q}`, "What are the treatment options for diabetes?")
+    
+    req, err := http.NewRequest("POST", EMBEDDING_SERVER_URL + "/query", bytes.NewBuffer([]byte(payload)))
     if err != nil {
-        log.Printf("Step 3.2: Error creating ChromaDB request: %v", err)
-        return nil, err
+        return nil, fmt.Errorf("error creating request: %v", err)
     }
+    
     req.Header.Set("Content-Type", "application/json")
-
     client := &http.Client{}
-    log.Printf("Step 3.3: Sending request to ChromaDB (v1 API)")
     resp, err := client.Do(req)
     if err != nil {
-        log.Printf("Step 3.4: Error sending request to ChromaDB: %v", err)
-        log.Printf("HINT: If you are not using Docker, start ChromaDB with: chroma run")
-        log.Printf("      Or see https://docs.trychroma.com/getting-started for setup instructions.")
-        return nil, err
+        return nil, fmt.Errorf("error querying embedding server: %v", err)
     }
     defer resp.Body.Close()
 
-    body, err := ioutil.ReadAll(resp.Body)
-    if err != nil {
-        log.Printf("Step 3.5: Error reading ChromaDB response: %v", err)
-        return nil, err
+    var result struct {
+        Results []string `json:"results"`
+        Count   int      `json:"count"`
+    }
+    
+    body, _ := ioutil.ReadAll(resp.Body)
+    log.Printf("Raw response from embedding server: %s", string(body))
+    
+    if err := json.NewDecoder(bytes.NewReader(body)).Decode(&result); err != nil {
+        return nil, fmt.Errorf("error decoding response: %v, body: %s", err, string(body))
     }
 
-    // Log HTTP status and body for debugging
-    log.Printf("Step 3.5b: ChromaDB HTTP status: %d", resp.StatusCode)
-    log.Printf("Step 3.5c: ChromaDB raw response: %s", string(body))
-
-    if resp.StatusCode == 405 {
-        log.Printf("HINT: ChromaDB returned 405 (Method Not Allowed). This usually means the endpoint does not accept POST requests.")
-        log.Printf("      Double-check the ChromaDB REST API docs for the correct method and endpoint: https://docs.trychroma.com/reference/rest")
-        log.Printf("      Also ensure your ChromaDB server is up-to-date and supports the /api/v1/query POST endpoint.")
-        return nil, fmt.Errorf("ChromaDB returned 405 Method Not Allowed for /api/v1/query")
-    }
-    if resp.StatusCode == 404 {
-        log.Printf("HINT: ChromaDB returned 404. This usually means the /api/v1/query endpoint does not exist or is not enabled.")
-        log.Printf("      Double-check your ChromaDB version and API docs: https://docs.trychroma.com/reference/rest")
-        log.Printf("      Also ensure your ChromaDB server is up-to-date and supports the v1 API.")
-        return nil, fmt.Errorf("ChromaDB returned 404 Not Found for /api/v1/query")
-    }
-    if resp.StatusCode != 200 {
-        return nil, fmt.Errorf("ChromaDB returned non-200 status: %d, body: %s", resp.StatusCode, string(body))
-    }
-
-    // Parse response (adjust according to your ChromaDB v1 API response)
-    var chromaResp struct {
-        Results [][]struct {
-            Document string `json:"document"`
-        } `json:"results"`
-    }
-    if err := json.Unmarshal(body, &chromaResp); err != nil {
-        log.Printf("Step 3.6: Error unmarshalling ChromaDB response: %v", err)
-        log.Printf("ChromaDB raw response: %s", string(body))
-        return nil, err
-    }
-
-    var contexts []string
-    if len(chromaResp.Results) > 0 {
-        for _, doc := range chromaResp.Results[0] {
-            contexts = append(contexts, doc.Document)
-        }
-        log.Printf("Step 3.7: ChromaDB returned %d contexts", len(contexts))
-    } else {
-        log.Printf("Step 3.7: ChromaDB returned 0 contexts")
-    }
-    return contexts, nil
+    log.Printf("Found %d matching documents", result.Count)
+    return result.Results, nil
 }
 
 // Helper: Convert []float32 to comma-separated string
