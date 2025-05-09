@@ -43,29 +43,45 @@ async def create_embedding(request: TextRequest):
     
     return {"embedding": embedding.tolist()}
 
-@app.post("/query")
-async def query_similar(request: TextRequest):
-    # Get embedding for query text
-    query_embedding = model.encode(request.text)
-    print(f"\nQuerying with text: {request.text}")
-    print(f"Generated embedding shape: {query_embedding.shape}")
-    
-    # Query ChromaDB collection
-    results = collection.query(
-        query_embeddings=[query_embedding.tolist()],
-        n_results=3
-    )
-    
-    # Format response properly
-    documents = results["documents"][0] if results["documents"] else []
-    return {
-        "results": documents,
-        "count": len(documents)
-    }
+def get_medical_category(query):
+    """Determine medical category from query text"""
+    query_lower = query.lower()
+    if any(word in query_lower for word in ["asthma", "breathing", "inhaler"]):
+        return "respiratory"
+    elif any(word in query_lower for word in ["diabetes", "blood sugar"]):
+        return "diabetes"
+    elif any(word in query_lower for word in ["heart", "cardiac", "blood pressure"]):
+        return "cardiology"
+    return None
 
 class QueryRequest(BaseModel):
-    query_embeddings: List[List[float]]
+    text: str
+    embedding: List[float]
     n_results: int = 3
+
+@app.post("/query")
+async def query_similar(request: QueryRequest):
+    print(f"\n=== Searching documents for: {request.text} ===")
+    try:
+        results = collection.query(
+            query_embeddings=[request.embedding],
+            n_results=request.n_results,
+            include=["metadatas", "distances", "documents"]
+        )
+        
+        if not results["ids"]:
+            print("No matching documents found")
+            return {"results": [], "count": 0}
+            
+        print(f"Found {len(results['documents'][0])} matching documents")
+        return {
+            "results": results["documents"][0],
+            "count": len(results["documents"][0])
+        }
+            
+    except Exception as e:
+        print(f"Error during search: {e}")
+        return {"results": [], "count": 0}
 
 @app.post("/add_documents")
 async def add_documents(documents: List[str]):

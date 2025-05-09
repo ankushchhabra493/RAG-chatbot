@@ -11,10 +11,11 @@ model = SentenceTransformer('all-MiniLM-L6-v2')
 client = chromadb.PersistentClient(path="./chroma_db")  # Using persistent storage
 collection = client.get_or_create_collection(name="pubmed-central")
 
-def fetch_pubmed_data(search_term, max_results=100):
+def fetch_pubmed_data(search_term, category, subcategory=None, max_results=100):
     print(f"\n=== Fetching from PubMed ===")
+    print(f"Category: {category}")
+    print(f"Subcategory: {subcategory}")
     print(f"Search term: {search_term}")
-    print(f"Max results requested: {max_results}")
     
     # Search PubMed
     handle = Entrez.esearch(db="pubmed", term=search_term, retmax=max_results)
@@ -34,10 +35,25 @@ def fetch_pubmed_data(search_term, max_results=100):
             # Combine title and abstract
             text = f"Title: {record.get('TI', 'No Title')}\nAbstract: {record['AB']}"
             pmid = record.get('PMID', '')
-            print(f"Processing PMID {pmid}: {record.get('TI', 'No Title')[:100]}...")
+            
+            # Enhanced metadata
+            metadata = {
+                'category': category,
+                'subcategory': subcategory,
+                'source': 'pubmed',
+                'pmid': pmid,
+                'title': record.get('TI', 'No Title'),
+                'authors': record.get('AU', []),
+                'publication_date': record.get('DP', ''),
+                'journal': record.get('JT', ''),
+                'mesh_terms': record.get('MH', []),
+                'search_term': search_term
+            }
+            
             documents.append({
                 'id': pmid,
-                'text': text
+                'text': text,
+                'metadata': metadata
             })
     
     print(f"\nSuccessfully processed {len(documents)} documents with abstracts")
@@ -63,39 +79,174 @@ def add_to_chroma(documents):
             collection.add(
                 documents=texts,
                 embeddings=embeddings.tolist(),
-                ids=[doc['id'] for doc in batch]
+                ids=[doc['id'] for doc in batch],
+                metadatas=[doc['metadata'] for doc in batch]  # Add metadata
             )
             total_added += len(batch)
             print(f"Added batch {i//batch_size + 1} ({len(batch)} documents)")
             print(f"Total documents added so far: {total_added}")
+            print(f"Added batch with categories: {[doc['metadata']['category'] for doc in batch][:3]}...")
         except Exception as e:
             print(f"Error adding batch: {e}")
         
         time.sleep(1)  # Prevent overwhelming the system
 
-def main():
-    # More specific medical search terms
-    search_terms = [
-        "diabetes type 2 treatment guidelines",
-        "hypertension management recent advances",
-        "covid 19 treatment protocols",
-        "alzheimer's disease current research",
-        "obesity management strategies",
-        "asthma treatment guidelines",
-        "heart failure management",
-        "cancer immunotherapy advances"
-    ]
+def search_documents(query_text, category=None, limit=3):
+    """
+    Search documents using both semantic similarity and metadata filtering
+    """
+    print(f"\n=== Searching documents ===")
+    print(f"Query: {query_text}")
+    print(f"Category filter: {category}")
     
-    for term in search_terms:
-        print(f"\n=== Processing search term: {term} ===")
-        documents = fetch_pubmed_data(term)
-        print(f"Found {len(documents)} documents")
-        add_to_chroma(documents)
-        print(f"Completed adding documents for: {term}")
+    try:
+        # Generate embedding for query
+        query_embedding = model.encode(query_text).tolist()
         
+        # Build where clause
+        where = {}
+        if category:
+            where["category"] = category
+        
+        # Query collection with detailed logging
+        print("Executing ChromaDB query...")
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=limit,
+            where=where,
+            include=["metadatas", "distances", "documents"]
+        )
+        
+        if not results["ids"]:
+            print("No matching documents found")
+            return []
+            
+        print(f"Found {len(results['documents'][0])} matching documents")
+        
+        # Format results with metadata and scores
+        formatted_results = []
+        for i, (doc, meta, dist) in enumerate(zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0]
+        )):
+            similarity = 1 - dist  # Convert distance to similarity score
+            formatted_results.append({
+                "document": doc,
+                "metadata": meta,
+                "similarity": similarity,
+                "rank": i + 1
+            })
+            
+            # Print detailed match information
+            print(f"\nMatch {i+1} (similarity: {similarity:.4f})")
+            print(f"Category: {meta.get('category')}/{meta.get('subcategory')}")
+            print(f"Title: {meta.get('title')[:100]}...")
+            
+        return formatted_results
+            
+    except Exception as e:
+        print(f"Error during search: {e}")
+        return []
+
+def get_collection_stats():
+    """Get statistics about the document collection"""
+    try:
+        doc_count = collection.count()
+        print(f"\nTotal documents: {doc_count}")
+        
+        # Get sample to analyze categories
+        if doc_count > 0:
+            results = collection.query(
+                query_embeddings=[model.encode("medical").tolist()],
+                n_results=doc_count,
+                include=["metadatas"]
+            )
+            
+            categories = {}
+            for meta in results["metadatas"][0]:
+                cat = meta.get("category", "unknown")
+                subcat = meta.get("subcategory", "unknown")
+                if cat not in categories:
+                    categories[cat] = {}
+                if subcat not in categories[cat]:
+                    categories[cat][subcat] = 0
+                categories[cat][subcat] += 1
+            
+            print("\nDocument distribution:")
+            for cat, subcats in categories.items():
+                print(f"\n{cat}:")
+                for subcat, count in subcats.items():
+                    print(f"  {subcat}: {count} documents")
+                    
+    except Exception as e:
+        print(f"Error getting stats: {e}")
+
+def main():
+    # Organized medical topics with categories
+    medical_topics = {
+        "endocrinology": {
+            "diabetes": [
+                "diabetes type 2 treatment guidelines",
+                "diabetes management protocol",
+                "diabetic complications prevention"
+            ],
+            "obesity": [
+                "obesity management strategies",
+                "weight loss interventions"
+            ]
+        },
+        "cardiology": {
+            "heart_failure": [
+                "heart failure management",
+                "cardiac treatment advances"
+            ],
+            "hypertension": [
+                "hypertension management recent advances",
+                "blood pressure control guidelines"
+            ]
+        },
+        "respiratory": {
+            "asthma": [
+                "asthma treatment guidelines",
+                "bronchial asthma therapy"
+            ]
+        },
+        "neurology": {
+            "alzheimer": [
+                "alzheimer's disease current research",
+                "dementia treatment advances"
+            ]
+        },
+        "infectious_disease": {
+            "covid19": [
+                "covid 19 treatment protocols",
+                "coronavirus management guidelines"
+            ]
+        },
+        "oncology": {
+            "immunotherapy": [
+                "cancer immunotherapy advances",
+                "tumor treatment innovations"
+            ]
+        }
+    }
+    
+    for category, subcategories in medical_topics.items():
+        for subcategory, terms in subcategories.items():
+            for term in terms:
+                print(f"\n=== Processing: {category}/{subcategory} - {term} ===")
+                documents = fetch_pubmed_data(term, category, subcategory)
+                add_to_chroma(documents)
+                print(f"Completed adding documents for {category}/{subcategory}")
+
     # Print final collection stats
     print("\n=== Final Collection Statistics ===")
     print(f"Total documents in ChromaDB: {collection.count()}")
+    
+    # Print collection statistics after adding documents
+    print("\n=== Collection Statistics ===")
+    get_collection_stats()
 
 if __name__ == "__main__":
     main()

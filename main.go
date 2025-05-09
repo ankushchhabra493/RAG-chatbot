@@ -142,12 +142,17 @@ func getEmbedding(ctx context.Context, text string) ([]float32, error) {
 }
 
 // Helper: Query ChromaDB for relevant contexts
-func queryChromaDB(queryEmbedding []float32, topK int) ([]string, error) {
+func queryChromaDB(queryEmbedding []float32, text string, topK int) ([]string, error) {
     log.Printf("Step 3.1: Querying embedding server for similar documents")
     
-    payload := fmt.Sprintf(`{"text": %q}`, "What are the treatment options for diabetes?")
+    // Create payload with both embedding and original text
+    payload := fmt.Sprintf(`{
+        "text": %q,
+        "embedding": [%s],
+        "n_results": %d
+    }`, text, floatArrayToString(queryEmbedding), topK)
     
-    req, err := http.NewRequest("POST", EMBEDDING_SERVER_URL + "/query", bytes.NewBuffer([]byte(payload)))
+    req, err := http.NewRequest("POST", EMBEDDING_SERVER_URL+"/query", bytes.NewBuffer([]byte(payload)))
     if err != nil {
         return nil, fmt.Errorf("error creating request: %v", err)
     }
@@ -216,7 +221,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
     var retrievedContexts []string
     if err == nil && embedding != nil {
         log.Printf("Step 3: Querying ChromaDB for relevant contexts")
-        retrievedContexts, err = queryChromaDB(embedding, 3)
+        retrievedContexts, err = queryChromaDB(embedding, req.Message, 3)  // Pass the actual query
         if err != nil {
             log.Printf("ChromaDB retrieval error: %v", err)
         } else {
@@ -230,14 +235,19 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
     log.Printf("Step 4: Building prompt for Gemini")
     var promptBuilder strings.Builder
     if len(retrievedContexts) > 0 {
-        promptBuilder.WriteString("You are a medical assistant. Use the following PubMed Central context to answer the question:\n\n")
+        promptBuilder.WriteString("You are a knowledgeable medical assistant. I'll provide you with some relevant medical context from PubMed, but please use your comprehensive knowledge to provide a complete answer.\n\n")
+        promptBuilder.WriteString("Relevant medical context:\n")
         for i, ctx := range retrievedContexts {
             promptBuilder.WriteString(fmt.Sprintf("Context %d: %s\n", i+1, ctx))
         }
-        promptBuilder.WriteString("\nQuestion: ")
+        promptBuilder.WriteString("\nBased on this context and your medical knowledge, please:\n")
+        promptBuilder.WriteString("1. First, briefly summarize what aspects the provided context covers\n")
+        promptBuilder.WriteString("2. Then, provide a comprehensive answer to the question using both the context and your broader knowledge\n")
+        promptBuilder.WriteString("3. If the context is not directly relevant, explain why and still provide a helpful answer\n\n")
+        promptBuilder.WriteString("Question: ")
         promptBuilder.WriteString(req.Message)
     } else {
-        promptBuilder.WriteString("You are a medical assistant. Answer the following question:\n")
+        promptBuilder.WriteString("You are a knowledgeable medical assistant. Please provide a comprehensive answer to the following question using your medical expertise:\n\n")
         promptBuilder.WriteString(req.Message)
     }
     finalPrompt := promptBuilder.String()
