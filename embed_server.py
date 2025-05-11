@@ -63,20 +63,37 @@ class QueryRequest(BaseModel):
 async def query_similar(request: QueryRequest):
     print(f"\n=== Searching documents for: {request.text} ===")
     try:
+        # Get more results since we're dealing with chunks
+        n_results = request.n_results * 3  # Get extra results to find best chunks
+        
         results = collection.query(
             query_embeddings=[request.embedding],
-            n_results=request.n_results,
+            n_results=n_results,
             include=["metadatas", "distances", "documents"]
         )
         
         if not results["ids"]:
             print("No matching documents found")
             return {"results": [], "count": 0}
+        
+        # Group chunks by PMID and select best chunks
+        pmid_chunks = {}
+        for doc, meta, dist in zip(results["documents"][0], results["metadatas"][0], results["distances"][0]):
+            pmid = meta['pmid']
+            if pmid not in pmid_chunks:
+                pmid_chunks[pmid] = []
+            pmid_chunks[pmid].append((doc, dist))
+        
+        # Select best chunk from each document
+        best_results = []
+        for pmid, chunks in sorted(pmid_chunks.items(), key=lambda x: min(c[1] for c in x[1]))[:request.n_results]:
+            best_chunk = min(chunks, key=lambda x: x[1])
+            best_results.append(best_chunk[0])
             
-        print(f"Found {len(results['documents'][0])} matching documents")
+        print(f"Found {len(best_results)} matching documents")
         return {
-            "results": results["documents"][0],
-            "count": len(results["documents"][0])
+            "results": best_results,
+            "count": len(best_results)
         }
             
     except Exception as e:

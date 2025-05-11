@@ -23,6 +23,8 @@ const (
 	CHROMA_API_URL       = "http://localhost:8000/api/v1/query"
 	CHROMA_HEARTBEAT_URL = "http://localhost:8000/api/v1/heartbeat"
 	CHROMA_COLLECTION    = "pubmed-central"
+	CHUNK_SIZE           = 150 // Number of words per chunk
+	OVERLAP_SIZE         = 15  // Number of overlapping words
 )
 
 type ChatRequest struct {
@@ -31,6 +33,12 @@ type ChatRequest struct {
 
 type ChatResponse struct {
 	Response string `json:"response"`
+}
+
+type TextChunk struct {
+	Text      string
+	StartWord int
+	EndWord   int
 }
 
 var client *genai.Client
@@ -99,12 +107,41 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// createTextChunks splits text into overlapping chunks
+func createTextChunks(text string) []TextChunk {
+	words := strings.Fields(text)
+	var chunks []TextChunk
+
+	for i := 0; i < len(words); i += (CHUNK_SIZE - OVERLAP_SIZE) {
+		end := i + CHUNK_SIZE
+		if end > len(words) {
+			end = len(words)
+		}
+
+		// Only create chunk if it has meaningful content
+		if end-i >= OVERLAP_SIZE {
+			chunk := TextChunk{
+				Text:      strings.Join(words[i:end], " "),
+				StartWord: i,
+				EndWord:   end,
+			}
+			chunks = append(chunks, chunk)
+		}
+
+		if end == len(words) {
+			break
+		}
+	}
+
+	return chunks
+}
+
 // Helper: Get embedding for a query using Gemini
 func getEmbedding(ctx context.Context, text string) ([]float32, error) {
-	log.Printf("Step 2.1: Preparing embedding request to Python server")
+	log.Printf("Getting embedding for text of length: %d", len(text))
 	payload := fmt.Sprintf(`{"text": %q}`, text)
-	// Update the URL to use port 8000
-	req, err := http.NewRequest("POST", "http://localhost:8000/embed", bytes.NewBuffer([]byte(payload)))
+
+	req, err := http.NewRequest("POST", EMBEDDING_SERVER_URL+"/embed", bytes.NewBuffer([]byte(payload)))
 	if err != nil {
 		log.Printf("Step 2.2: Error creating embedding request: %v", err)
 		return nil, err
@@ -144,9 +181,8 @@ func getEmbedding(ctx context.Context, text string) ([]float32, error) {
 
 // Helper: Query ChromaDB for relevant contexts
 func queryChromaDB(queryEmbedding []float32, text string, topK int) ([]string, error) {
-	log.Printf("Step 3.1: Querying embedding server for similar documents")
+	log.Printf("Querying ChromaDB for similar text chunks")
 
-	// Create payload with both embedding and original text
 	payload := fmt.Sprintf(`{
         "text": %q,
         "embedding": [%s],
@@ -236,19 +272,44 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Step 4: Building prompt for Gemini")
 	var promptBuilder strings.Builder
 	if len(retrievedContexts) > 0 {
-		promptBuilder.WriteString("You are a knowledgeable medical assistant. I'll provide you with some relevant medical context from PubMed, but please use your comprehensive knowledge to provide a complete answer.\n\n")
-		promptBuilder.WriteString("Relevant medical context:\n")
+		promptBuilder.WriteString("You are a knowledgeable medical assistant. Below are relevant excerpts from medical literature:\n\n")
 		for i, ctx := range retrievedContexts {
-			promptBuilder.WriteString(fmt.Sprintf("Context %d: %s\n", i+1, ctx))
+			promptBuilder.WriteString(fmt.Sprintf("Excerpt %d:\n%s\n\n", i+1, ctx))
 		}
-		promptBuilder.WriteString("\nBased on this context and your medical knowledge, please:\n")
-		promptBuilder.WriteString("1. First, briefly summarize what aspects the provided context covers\n")
-		promptBuilder.WriteString("2. Then, provide a comprehensive answer to the question using both the context and your broader knowledge\n")
-		promptBuilder.WriteString("3. If the context is not directly relevant, explain why and still provide a helpful answer\n\n")
+		promptBuilder.WriteString("Using the above excerpts and your medical knowledge, please:\n\n")
+		promptBuilder.WriteString("### 1. Key Points:\n\n")
+		promptBuilder.WriteString("- Point 1\n")
+		promptBuilder.WriteString("- Point 2\n")
+		promptBuilder.WriteString("- Point 3\n\n")
+		promptBuilder.WriteString("### 2. Detailed Analysis:\n\n")
+		promptBuilder.WriteString("For each major point:\n")
+		promptBuilder.WriteString("- Main finding\n")
+		promptBuilder.WriteString("  * Supporting detail\n")
+		promptBuilder.WriteString("  * Evidence from excerpts\n\n")
+		promptBuilder.WriteString("### 3. Additional Recommendations:\n\n")
+		promptBuilder.WriteString("- Recommendation 1\n")
+		promptBuilder.WriteString("- Recommendation 2\n")
+		promptBuilder.WriteString("- Recommendation 3\n\n")
+		promptBuilder.WriteString("Please maintain this exact formatting with proper line breaks and bullet points.\n\n")
 		promptBuilder.WriteString("Question: ")
 		promptBuilder.WriteString(req.Message)
 	} else {
-		promptBuilder.WriteString("You are a knowledgeable medical assistant. Please provide a comprehensive answer to the following question using your medical expertise:\n\n")
+		promptBuilder.WriteString("You are a knowledgeable medical assistant. Please format your response exactly as follows:\n\n")
+		promptBuilder.WriteString("### 1. Key Points:\n\n")
+		promptBuilder.WriteString("- Point 1\n")
+		promptBuilder.WriteString("- Point 2\n")
+		promptBuilder.WriteString("- Point 3\n\n")
+		promptBuilder.WriteString("### 2. Detailed Analysis:\n\n")
+		promptBuilder.WriteString("For each point:\n")
+		promptBuilder.WriteString("- Main concept\n")
+		promptBuilder.WriteString("  * Supporting evidence\n")
+		promptBuilder.WriteString("  * Detailed explanation\n\n")
+		promptBuilder.WriteString("### 3. Recommendations:\n\n")
+		promptBuilder.WriteString("- Recommendation 1\n")
+		promptBuilder.WriteString("- Recommendation 2\n")
+		promptBuilder.WriteString("- Recommendation 3\n\n")
+		promptBuilder.WriteString("Please maintain this exact formatting with proper line breaks and bullet points.\n\n")
+		promptBuilder.WriteString("Question: ")
 		promptBuilder.WriteString(req.Message)
 	}
 	finalPrompt := promptBuilder.String()
@@ -321,6 +382,38 @@ func checkChromaDBHealth() {
 	defer resp.Body.Close()
 	body, _ := ioutil.ReadAll(resp.Body)
 	log.Printf("ChromaDB v1 heartbeat response: %s", string(body))
+}
+
+// Function to add a document to ChromaDB (you would call this when indexing documents)
+func addDocumentToChromaDB(text string) error {
+	chunks := createTextChunks(text)
+	log.Printf("Created %d chunks from document", len(chunks))
+
+	for _, chunk := range chunks {
+		embedding, err := getEmbedding(context.Background(), chunk.Text)
+		if err != nil {
+			return fmt.Errorf("error getting embedding for chunk: %v", err)
+		}
+
+		// Call the endpoint to add chunk to ChromaDB
+		payload := map[string]interface{}{
+			"text":      chunk.Text,
+			"embedding": embedding,
+		}
+
+		jsonData, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("error marshaling payload: %v", err)
+		}
+
+		resp, err := http.Post(EMBEDDING_SERVER_URL+"/add_documents", "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return fmt.Errorf("error adding chunk to ChromaDB: %v", err)
+		}
+		defer resp.Body.Close()
+	}
+
+	return nil
 }
 
 func main() {
