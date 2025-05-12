@@ -233,6 +233,8 @@ func floatArrayToString(arr []float32) string {
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
 	log.Printf("---- handleChat called ----")
+	startTime := time.Now()
+
 	// Enable CORS headers for the actual response
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
@@ -256,13 +258,16 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 	ctx := context.Background()
 
+	// Start measuring retrieval time
+	retrievalStart := time.Now()
+
 	// === RAG: Retrieve relevant PubMed Central context ===
 	log.Printf("Step 2: Getting embedding for user query")
 	embedding, err := getEmbedding(ctx, req.Message)
 	var retrievedContexts []string
 	if err == nil && embedding != nil {
 		log.Printf("Step 3: Querying ChromaDB for relevant contexts")
-		retrievedContexts, err = queryChromaDB(embedding, req.Message, 10) // Pass the actual query
+		retrievedContexts, err = queryChromaDB(embedding, req.Message, 50) // Pass the actual query
 		if err != nil {
 			log.Printf("ChromaDB retrieval error: %v", err)
 		} else {
@@ -271,6 +276,9 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	} else {
 		log.Printf("Embedding error: %v", err)
 	}
+
+	retrievalTime := time.Since(retrievalStart)
+	log.Printf("Retrieval time: %.2f seconds", retrievalTime.Seconds())
 
 	// Compose prompt with retrieved context
 	log.Printf("Step 4: Building prompt for Gemini")
@@ -319,10 +327,16 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	finalPrompt := promptBuilder.String()
 	log.Printf("Final prompt sent to Gemini:\n%s", finalPrompt)
 
+	// Start measuring LLM processing time
+	llmStart := time.Now()
+
 	// === Gemini LLM Call ===
 	log.Printf("Step 5: Sending prompt to Gemini LLM")
 	cs := model.StartChat()
 	resp, err := sendMessageWithRetry(ctx, cs, finalPrompt)
+
+	llmTime := time.Since(llmStart)
+	log.Printf("LLM processing time: %.2f seconds", llmTime.Seconds())
 
 	if err != nil {
 		log.Printf("Gemini API error (FULL): %v", err)
@@ -374,6 +388,12 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("Successfully sent response to client")
+
+	totalTime := time.Since(startTime)
+	log.Printf("\n=== Performance Metrics ===")
+	log.Printf("Retrieval Time: %.2f seconds", retrievalTime.Seconds())
+	log.Printf("LLM Processing Time: %.2f seconds", llmTime.Seconds())
+	log.Printf("Total Response Time: %.2f seconds", totalTime.Seconds())
 }
 
 // (Optional) Add a health check for ChromaDB v1
