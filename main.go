@@ -214,6 +214,10 @@ func queryChromaDB(queryEmbedding []float32, text string, topK int) ([]string, e
 		return nil, fmt.Errorf("error decoding response: %v, body: %s", err, string(body))
 	}
 
+	if result.Count < topK {
+		log.Printf("Warning: Found fewer documents (%d) than requested (%d)", result.Count, topK)
+	}
+
 	log.Printf("Found %d matching documents", result.Count)
 	return result.Results, nil
 }
@@ -258,7 +262,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	var retrievedContexts []string
 	if err == nil && embedding != nil {
 		log.Printf("Step 3: Querying ChromaDB for relevant contexts")
-		retrievedContexts, err = queryChromaDB(embedding, req.Message, 3) // Pass the actual query
+		retrievedContexts, err = queryChromaDB(embedding, req.Message, 10) // Pass the actual query
 		if err != nil {
 			log.Printf("ChromaDB retrieval error: %v", err)
 		} else {
